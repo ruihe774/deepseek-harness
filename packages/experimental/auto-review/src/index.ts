@@ -165,12 +165,20 @@ export interface Config {
   readonly provider?: string
   /** Model id that receives review requests; must be paired with `provider`. */
   readonly model?: string
+  /**
+   * Model-facing tool aliases keyed by canonical tool name, for tool executors
+   * that rename a model call (for example `exec`) to its canonical tool (`bash`)
+   * before dispatch. A visible call may differ from its logged call only by one
+   * of these pairs; the reviewer sees the model-facing name.
+   */
+  readonly toolAliases?: Readonly<Record<string, string>>
 }
 
-/** Loader schema for the optional reviewer route; no defaults. */
+/** Loader schema for the optional reviewer route and tool aliases; no defaults. */
 export const Config: z<Config> = z.object({
   provider: z.string(),
   model: z.string(),
+  toolAliases: z.dict(z.string()),
 })
 
 /**
@@ -385,11 +393,17 @@ function toolSchemaEntry(mode: CallMode, schema: ToolSchema): HistoricalToolSche
   return { kind: 'tool-schema', role: 'fact', mode, name: schema.name, description: schema.description, parameters: schema.parameters }
 }
 
+/** Report whether a visible model-facing name may stand for a logged canonical name. */
+function sameToolName(logged: string, visible: string, aliases: Readonly<Record<string, string>>): boolean {
+  return logged === visible || (Object.hasOwn(aliases, logged) && aliases[logged] === visible)
+}
+
 /** Resolve one native action's schema from its visible call and latest request header. */
 function nativeAction(
   exec: ToolExecution,
   headerTools: readonly ToolSchema[] | undefined,
   logged: Extract<SessionEvent, { type: 'tool/call' }>,
+  visibleName: string,
 ): HistoricalToolSchema {
   if (logged.data.name !== exec.name
     || !sameJson(parseLoggedArguments(logged.data.arguments), exec.arguments)) {
@@ -397,12 +411,12 @@ function nativeAction(
   }
   const candidates: readonly unknown[] = Array.isArray(headerTools) ? headerTools : []
   const schemas = candidates.filter((schema): schema is Record<string, unknown> =>
-    isRecord(schema) && schema['name'] === exec.name)
+    isRecord(schema) && schema['name'] === visibleName)
   const [candidate] = schemas
   if (candidate === undefined || schemas.length !== 1) {
     throw new Error('auto-review: the pending native tool schema is missing or ambiguous')
   }
-  return toolSchemaEntry('native', loggedSchema(candidate, exec.name, 'native'))
+  return toolSchemaEntry('native', loggedSchema(candidate, visibleName, 'native'))
 }
 
 /** Resolve a PTC inner action's schema from its binding and logged identity. */
@@ -436,6 +450,7 @@ function shownSchemaKey(mode: CallMode, scopedKey: string): string {
  * @param cwd - the Session's current working directory.
  * @param shown - schemas earlier reviews of this Session showed.
  * @param reviewer - configured reviewer route; `undefined` selects the request header's route.
+ * @param aliases - model-facing tool names keyed by canonical tool name.
  * @returns the exact route, environment, and history ending with the pending call.
  */
 function snapshotAutoReview(
@@ -444,6 +459,7 @@ function snapshotAutoReview(
   cwd: string,
   shown: ReadonlyMap<string, HistoricalToolSchema>,
   reviewer: ReviewerRoute | undefined,
+  aliases: Readonly<Record<string, string>>,
 ): ReviewSnapshot {
   const { session } = agent
   // The reviewer's risk inputs are the whole action history: earlier native calls
@@ -517,6 +533,7 @@ function snapshotAutoReview(
   }
   const visibleParentKeys = new Set<string>()
   let passedCurrentRoot = false
+  let currentRootName: string | undefined
   for (const seq of nodes) {
     // Surface nodes are event indexes produced by this Session's validated fold.
     // oxlint-disable-next-line typescript/no-non-null-assertion
@@ -574,13 +591,14 @@ function snapshotAutoReview(
       if (sawUnstartedSibling) {
         throw new Error('auto-review: visible native call logs do not form a started prefix')
       }
-      if (call.data.name !== block.name || call.data.arguments !== block.arguments) {
+      if (!sameToolName(call.data.name, block.name, aliases) || call.data.arguments !== block.arguments) {
         throw new Error('auto-review: a visible tool call disagrees with its logged action')
       }
       visibleParentKeys.add(key)
       if (call !== currentRootCall || exec.parent !== undefined) {
-        pushCall('native', shownSchemaKey('native', key), call.data.name, call.data.arguments)
+        pushCall('native', shownSchemaKey('native', key), block.name, call.data.arguments)
       }
+      if (isCurrentRoot) currentRootName = block.name
       for (const start of startsForCall) {
         if (start === currentPtcStart) continue
         const subCallKey = scopedCallKey(start.step, start.event.data.subCallId)
@@ -590,7 +608,7 @@ function snapshotAutoReview(
     }
   }
 
-  if (!passedCurrentRoot) {
+  if (!passedCurrentRoot || currentRootName === undefined) {
     throw new Error('auto-review: the pending root call is missing from the current surface')
   }
 
@@ -598,9 +616,9 @@ function snapshotAutoReview(
   if (currentPtcStart === undefined) {
     pending = {
       key: shownSchemaKey('native', scopedCallKey(currentStep, exec.rootCallId)),
-      schema: nativeAction(exec, header.tools, currentRootCall),
+      schema: nativeAction(exec, header.tools, currentRootCall, currentRootName),
     }
-    pushCall('native', pending.key, exec.name, currentRootCall.data.arguments, pending.schema)
+    pushCall('native', pending.key, currentRootName, currentRootCall.data.arguments, pending.schema)
   } else {
     pending = {
       key: shownSchemaKey('ptc-inner', scopedCallKey(currentStep, exec.callId)),
@@ -717,9 +735,10 @@ async function classifyRisk(
   signal: AbortSignal,
   shown: ShownSchemas,
   reviewer: ReviewerRoute | undefined,
+  aliases: Readonly<Record<string, string>>,
 ): Promise<AutoReviewDecision> {
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
-  const snapshot = snapshotAutoReview(agent, exec, cwd, shown, reviewer)
+  const snapshot = snapshotAutoReview(agent, exec, cwd, shown, reviewer, aliases)
   shown.set(snapshot.pending.key, snapshot.pending.schema)
   // This review prompt is sent only through ctx.llm.stream and never enters a Session log.
   // The Session id also supplies provider routing and request-extension identity.
@@ -780,6 +799,7 @@ function failed(exec: ToolExecution, error: unknown): PreToolDecision {
  */
 export function apply(ctx: Context, config: Config): void {
   const reviewer = resolveReviewer(config)
+  const aliases = deepFreeze({ ...config.toolAliases })
   // Retain the injected service while this context drains on disposal.
   const permissionPresets = ctx.permissionPresets
   let accepting = true
@@ -809,7 +829,7 @@ export function apply(ctx: Context, config: Config): void {
           shown = new Map()
           shownBySession.set(agent.session, shown)
         }
-        const review = await classifyRisk(ctx, agent, exec, signal, shown, reviewer).then(
+        const review = await classifyRisk(ctx, agent, exec, signal, shown, reviewer, aliases).then(
           decision => ({ ok: true as const, decision }),
           (error: unknown) => ({ ok: false as const, error }),
         )

@@ -1852,6 +1852,55 @@ describe('configured reviewer route', () => {
   })
 })
 
+describe('configured tool aliases', () => {
+  /** Run one call that the model made as `run` and the executor logged as canonical `probe`. */
+  async function aliasedProbe(
+    autoConfig: AutoReview.Config,
+    earlierCall = false,
+  ): Promise<{ adapter: RecordingAdapter; runs: number; result: Awaited<ReturnType<typeof executeToolFixture>> }> {
+    const { ctx, adapter } = await harness([decisionChunks('{"risk":"low","decision":"allow"}')], undefined, autoConfig)
+    const probe = registerProbe(ctx)
+    const { session, agent } = autoSession(ctx, 'aliased-tool')
+    appendHeader(session, [{ name: 'run', description: 'aliased probe', parameters: { type: 'object' } }])
+    const callId = ToolCallId('aliased-call')
+    const blocks: ContentBlock[] = [{ type: 'tool-call', id: callId, name: 'run', arguments: '{"path":"b"}' }]
+    if (earlierCall) blocks.unshift({ type: 'tool-call', id: ToolCallId('earlier-call'), name: 'run', arguments: '{"path":"a"}' })
+    appendAssistant(session, blocks)
+    if (earlierCall) appendNativeCall(session, ToolCallId('earlier-call'), 'probe', '{"path":"a"}')
+    appendNativeCall(session, callId, 'probe', '{"path":"b"}')
+    const result = await executeToolFixture(ctx, {
+      signal: new AbortController().signal,
+      callId,
+      name: 'probe',
+      arguments: { path: 'b' },
+      agent,
+    })
+    return { adapter, runs: probe.runs(), result }
+  }
+
+  it('reviews a configured alias under the model-facing name and schema', async () => {
+    const { adapter, runs, result } = await aliasedProbe({ toolAliases: { probe: 'run' } }, true)
+    expect(result.isError).toBe(false)
+    expect(runs).toBe(1)
+    const sections = requestSections(adapter.requests[0]!)
+    expect(sections.PENDING_ACTION).toEqual({
+      mode: 'native', name: 'run', description: 'aliased probe', parameters: { type: 'object' }, arguments: { path: 'b' },
+    })
+    expect(sections.FILTERED_HISTORY).toEqual([
+      { kind: 'tool-call', role: 'fact', mode: 'native', name: 'run', arguments: '{"path":"a"}' },
+    ])
+  })
+
+  it('fails closed when the visible name is not the configured alias', async () => {
+    for (const autoConfig of [{}, { toolAliases: { probe: 'other' } }, { toolAliases: { run: 'probe' } }]) {
+      const { adapter, runs, result } = await aliasedProbe(autoConfig)
+      expectReviewFailure(result, 'auto-review: a visible tool call disagrees with its logged action')
+      expect(runs).toBe(0)
+      expect(adapter.requests).toHaveLength(0)
+    }
+  })
+})
+
 describe('logged-fact failures', () => {
   it('fails closed for missing, ambiguous, or conflicting native facts', async () => {
     const cases: Array<{
