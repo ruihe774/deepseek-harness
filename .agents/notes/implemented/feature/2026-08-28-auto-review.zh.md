@@ -30,7 +30,7 @@ Reviewer 从既有 Session 事实派生权威。`source.kind === 'user'` 的文�
 
 ### 一次完整 reviewer 请求
 
-Integration 只使用最新 `request/header.config` 的 provider／model 与 shipped adapter 默认 reasoning。它既不比较冗余 route metadata，也不复制主 agent 请求。请求由固定 system prompt 和其后的 user 消息组成：
+Integration 使用插件配置的 `provider` 与 `model`；未配置时使用最新 `request/header.config` 的 provider／model，并沿用 shipped adapter 默认 reasoning。Reviewer 路由属于部署选择；固定策略、评审输入与决策协议在两种路由下完全相同。它既不比较冗余 route metadata，也不复制主 agent 请求。请求由固定 system prompt 和其后的 user 消息组成：
 
 | 部分 | 保留输入 |
 | --- | --- |

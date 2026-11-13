@@ -2,6 +2,8 @@
  * LLM-backed authorization gate for the current-session-only Auto permission
  * preset. Every native call and every started PTC inner call is reviewed once
  * before its body; the outer `run_code` transport is deliberately excluded.
+ * The reviewer runs on the configured `provider` and `model`, or on each
+ * Session's current route when they are omitted.
  * Under the `ask` approval policy a reviewer denial asks the user; under
  * `never` it is final.
  *
@@ -17,6 +19,7 @@ declare module '@deepseek-ai/dsh-llm/types' {
 import type {} from '@deepseek-ai/dsh-tool-executor-ptc/types'
 import type {} from '@deepseek-ai/dsh-working-directory'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-instructions'
 import {
@@ -124,9 +127,13 @@ type HistoricalEntry = HistoricalUserMessage | HistoricalToolCall | HistoricalTo
  */
 type ShownSchemas = Map<string, HistoricalToolSchema>
 
-interface ReviewSnapshot {
+/** Provider and model that receive review requests. */
+interface ReviewerRoute {
   readonly provider: string
   readonly model: string
+}
+
+interface ReviewSnapshot extends ReviewerRoute {
   readonly cwd: string
   /** Retained items in Session order, ending with the pending call. */
   readonly history: readonly HistoricalEntry[]
@@ -151,6 +158,38 @@ interface ScopedPtcStart {
 export const name = 'experimental-auto-review'
 /** Complete host services required before Auto may be advertised. */
 export const inject = ['approval', 'llm', 'permissionPresets', 'sessions', 'tools', 'workingDirectory']
+
+/** Optional reviewer route; omission reviews with each Session's current route. */
+export interface Config {
+  /** Provider that receives review requests; must be paired with `model`. */
+  readonly provider?: string
+  /** Model id that receives review requests; must be paired with `provider`. */
+  readonly model?: string
+}
+
+/** Loader schema for the optional reviewer route; no defaults. */
+export const Config: z<Config> = z.object({
+  provider: z.string(),
+  model: z.string(),
+})
+
+/**
+ * Validate the optional reviewer route.
+ * @param config - untrusted plugin configuration.
+ * @returns the configured route, or `undefined` to use each Session's current route.
+ * @throws {Error} when only one of `provider` and `model` is set, or either is empty.
+ */
+function resolveReviewer(config: Config): ReviewerRoute | undefined {
+  const { provider, model } = config
+  if (provider === undefined && model === undefined) return undefined
+  if (provider === undefined || model === undefined) {
+    throw new Error('auto-review: provider and model must be configured together')
+  }
+  if (provider.length === 0 || model.length === 0) {
+    throw new Error('auto-review: configured provider and model must be non-empty strings')
+  }
+  return { provider, model }
+}
 
 /** Return JSON text for one immutable logged value. */
 function json(value: unknown): string {
@@ -396,6 +435,7 @@ function shownSchemaKey(mode: CallMode, scopedKey: string): string {
  * @param exec - immutable pending execution.
  * @param cwd - the Session's current working directory.
  * @param shown - schemas earlier reviews of this Session showed.
+ * @param reviewer - configured reviewer route; `undefined` selects the request header's route.
  * @returns the exact route, environment, and history ending with the pending call.
  */
 function snapshotAutoReview(
@@ -403,6 +443,7 @@ function snapshotAutoReview(
   exec: ToolExecution,
   cwd: string,
   shown: ReadonlyMap<string, HistoricalToolSchema>,
+  reviewer: ReviewerRoute | undefined,
 ): ReviewSnapshot {
   const { session } = agent
   // The reviewer's risk inputs are the whole action history: earlier native calls
@@ -413,9 +454,11 @@ function snapshotAutoReview(
   const events = session.snapshotEvents()
   const nodes = [...session.surface.nodes]
   const header = session.requestHeader()
-  if (header === undefined || header.config.provider.length === 0 || header.config.model.length === 0) {
+  if (header === undefined
+    || (reviewer === undefined && (header.config.provider.length === 0 || header.config.model.length === 0))) {
     throw new Error('auto-review: no complete request-header route is available')
   }
+  const route = reviewer ?? header.config
 
   const nativeCalls = events.filter((event): event is NativeCallEvent => event.type === 'tool/call')
   const { starts, openStep: currentStep } = scopePtcStarts(events)
@@ -566,8 +609,8 @@ function snapshotAutoReview(
     pushCall('ptc-inner', pending.key, exec.name, json(currentPtcStart.event.data.arguments), pending.schema)
   }
   return deepFreeze({
-    provider: header.config.provider,
-    model: header.config.model,
+    provider: route.provider,
+    model: route.model,
     cwd,
     history,
     pending,
@@ -666,16 +709,17 @@ async function readDecision(stream: AsyncIterable<StreamChunk>): Promise<AutoRev
   return parseDecision(final.text)
 }
 
-/** Review one frozen pending action with the fixed policy and current LLM route. */
+/** Review one frozen pending action with the fixed policy on the configured or current LLM route. */
 async function classifyRisk(
   ctx: Context,
   agent: Agent,
   exec: ToolExecution,
   signal: AbortSignal,
   shown: ShownSchemas,
+  reviewer: ReviewerRoute | undefined,
 ): Promise<AutoReviewDecision> {
   const cwd = await ctx.workingDirectory.ensure(agent, signal)
-  const snapshot = snapshotAutoReview(agent, exec, cwd, shown)
+  const snapshot = snapshotAutoReview(agent, exec, cwd, shown, reviewer)
   shown.set(snapshot.pending.key, snapshot.pending.schema)
   // This review prompt is sent only through ctx.llm.stream and never enters a Session log.
   // The Session id also supplies provider routing and request-extension identity.
@@ -728,8 +772,14 @@ function failed(exec: ToolExecution, error: unknown): PreToolDecision {
   }
 }
 
-/** Install the Auto preset and its review gate; preserve Session selection on application shutdown. */
-export function apply(ctx: Context): void {
+/**
+ * Install the Auto preset and its review gate; preserve Session selection on application shutdown.
+ * @param ctx - plugin context that owns the listener and preset contribution.
+ * @param config - optional reviewer route.
+ * @throws {Error} when the reviewer route is incomplete.
+ */
+export function apply(ctx: Context, config: Config): void {
+  const reviewer = resolveReviewer(config)
   // Retain the injected service while this context drains on disposal.
   const permissionPresets = ctx.permissionPresets
   let accepting = true
@@ -759,7 +809,7 @@ export function apply(ctx: Context): void {
           shown = new Map()
           shownBySession.set(agent.session, shown)
         }
-        const review = await classifyRisk(ctx, agent, exec, signal, shown).then(
+        const review = await classifyRisk(ctx, agent, exec, signal, shown, reviewer).then(
           decision => ({ ok: true as const, decision }),
           (error: unknown) => ({ ok: false as const, error }),
         )

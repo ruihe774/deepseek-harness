@@ -3,14 +3,14 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/experimental/auto-review/README.md
 /:
-  en: fdb9237f7c9ddfa6
-  zh: 3bb572e4a945183f
+  en: 2925e30d16c3f643
+  zh: 4b22908e1a3028f7
 /deepseek-ai-dsh-experimental-auto-review:
   en: 566562e610f1b52b
   zh: 88796a19ab0b98b8
 /deepseek-ai-dsh-experimental-auto-review/summary:
-  en: 10e8e61034f7706a
-  zh: 439e21bcff62a12d
+  en: 32b25f0ef723131d
+  zh: fda0b448519f918f
 /deepseek-ai-dsh-experimental-auto-review/table-of-contents:
   en: d152484eb41ac6b4
   zh: 09388d293f9be9cb
@@ -18,8 +18,11 @@
   en: 8f9e85817f05aa4d
   zh: f60136fb39abcf29
 /deepseek-ai-dsh-experimental-auto-review/use-this-package/install-into-a-profile:
-  en: 6198fc176a1e77fc
-  zh: f486661a0658f313
+  en: cf146a773e8c7010
+  zh: 57f7e9be7b257fcc
+/deepseek-ai-dsh-experimental-auto-review/use-this-package/choose-the-reviewer-model:
+  en: 6c28c7b5d683daa9
+  zh: dba81cdae9925ac4
 /deepseek-ai-dsh-experimental-auto-review/use-this-package/headless-supervision:
   en: 599d308cb426b48d
   zh: 946e5d2dae183b2e
@@ -27,8 +30,8 @@
   en: 68fbe81265de3d55
   zh: ad41f2353ba94a07
 /deepseek-ai-dsh-experimental-auto-review/understand-the-implementation:
-  en: 0d76e9a60573ee84
-  zh: 3297ae0898852b7d
+  en: 3a39fbef1d3cd8ba
+  zh: ba5e82b1a8186845
 /deepseek-ai-dsh-experimental-auto-review/further-exploration:
   en: 8b81d32ea370ecd3
   zh: dc53ff4da78232ac
@@ -39,8 +42,8 @@
   en: 7ec217b1012cd8fa
   zh: 6188796b4990f2ef
 /deepseek-ai-dsh-experimental-auto-review/model-experience/per-call-reviewer/what-the-model-sees:
-  en: d1670b32b5be6795
-  zh: d6a6456f415b0daa
+  en: 3c79b9fa51196497
+  zh: fb18328176349dfb
 /deepseek-ai-dsh-experimental-auto-review/model-experience/per-call-reviewer/token-effect:
   en: 9c3e575c061d53fe
   zh: 74db1c5a77b2d2a7

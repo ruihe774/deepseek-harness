@@ -131,6 +131,7 @@ function reasoningDecisionChunks(text: string): StreamChunk[] {
 async function harness(
   script: ReviewScript[],
   permissionConfig: NonNullable<Parameters<typeof PermissionPresetService.Config>[0]> = { presets: PRESETS, defaultPreset: 'workspace-write' },
+  autoConfig: AutoReview.Config = {},
 ): Promise<{ ctx: Context; adapter: RecordingAdapter; auto: PluginFiber }> {
   const ctx = new Context()
   provideWorkingDirectoryFixture(ctx)
@@ -155,7 +156,7 @@ async function harness(
     yield (await ctx.plugin(ApprovalService, { policy: 'ask' })).dispose
     yield (await ctx.plugin(PermissionPresetService, permissionConfig)).dispose
     yield ctx.llm.registerAdapter(['review'], adapter)
-    auto = await ctx.plugin(AutoReview)
+    auto = await ctx.plugin(AutoReview, autoConfig)
     yield auto.dispose
   })
   if (auto === undefined) throw new Error('Auto fixture did not activate')
@@ -1786,6 +1787,68 @@ describe('cancellation and integration teardown', () => {
     const auto = await invalid.plugin(AutoReview)
     expect(invalid.permissionPresets.names).toContain(AUTO_PRESET)
     await auto.dispose()
+  })
+})
+
+describe('configured reviewer route', () => {
+  async function reviewProbe(
+    autoConfig: AutoReview.Config,
+    headerConfig: { provider: string; model: string },
+  ): Promise<{ adapter: RecordingAdapter; runs: number; isError: boolean }> {
+    const { ctx, adapter } = await harness([decisionChunks('{"risk":"low","decision":"allow"}')], undefined, autoConfig)
+    const probe = registerProbe(ctx)
+    const { session, agent } = autoSession(ctx, 'configured-reviewer')
+    appendHeader(session, [{ name: 'probe', description: 'probe', parameters: { type: 'object' } }], headerConfig)
+    const callId = ToolCallId('configured-reviewer-call')
+    appendAssistant(session, [{ type: 'tool-call', id: callId, name: 'probe', arguments: '{}' }])
+    appendNativeCall(session, callId, 'probe', '{}')
+    const result = await executeToolFixture(ctx, {
+      signal: new AbortController().signal,
+      callId,
+      name: 'probe',
+      arguments: {},
+      agent,
+    })
+    return { adapter, runs: probe.runs(), isError: result.isError }
+  }
+
+  it('sends reviews to the configured provider and model instead of the Session route', async () => {
+    const { adapter, runs, isError } = await reviewProbe(
+      { provider: 'review', model: 'reviewer-model' },
+      { provider: 'main', model: 'main-model' },
+    )
+    expect(isError).toBe(false)
+    expect(runs).toBe(1)
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]).toMatchObject({
+      provider: 'review',
+      model: 'reviewer-model',
+      system: EXPECTED_REVIEW_POLICY,
+      purpose: 'auto-review',
+      sessionId: SessionId('configured-reviewer'),
+    })
+  })
+
+  it('reviews on the configured route when the Session route is incomplete', async () => {
+    const { adapter, runs } = await reviewProbe(
+      { provider: 'review', model: 'reviewer-model' },
+      { provider: '', model: '' },
+    )
+    expect(runs).toBe(1)
+    expect(adapter.requests[0]).toMatchObject({ provider: 'review', model: 'reviewer-model' })
+  })
+
+  it('rejects an unpaired or empty reviewer route at load', async () => {
+    const paired = 'auto-review: provider and model must be configured together'
+    const nonEmpty = 'auto-review: configured provider and model must be non-empty strings'
+    for (const [autoConfig, message] of [
+      [{ provider: 'review' }, paired],
+      [{ model: 'reviewer-model' }, paired],
+      [{ provider: '', model: 'reviewer-model' }, nonEmpty],
+      [{ provider: 'review', model: '' }, nonEmpty],
+    ] as const) {
+      await expect(harness([], undefined, autoConfig)).rejects.toThrow(message)
+    }
   })
 })
 
